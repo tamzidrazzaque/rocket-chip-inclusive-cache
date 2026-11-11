@@ -71,7 +71,11 @@ class Directory(params: InclusiveCacheParameters) extends Module
     data = Vec(params.cache.ways, UInt(codeBits.W))
   )
 
-  val write = Queue(io.write, 1) // must inspect contents => max size 1
+  val dualPort = params.micro.dirDualPort
+  require (!dualPort || !params.micro.dirReg, "dirDualPort forwards a same-cycle write one cycle later; not with dirReg")
+  // dualPort: the queue always drains (deq.ready is constant), so a pipe queue takes a write every cycle without the
+  // combinational loop through the scheduler that a pipe queue would create on the single-port directory
+  val write = Queue(io.write, 1, pipe = dualPort) // must inspect contents => max size 1
   // a flow Q creates a WaR hazard... this MIGHT not cause a problem
   // a pipe Q causes combinational loop through the scheduler
 
@@ -92,8 +96,8 @@ class Directory(params: InclusiveCacheParameters) extends Module
 
   require (codeBits <= 256)
 
-  write.ready := !io.read.valid
-  when (!ren && wen) {
+  write.ready := (if (dualPort) true.B else !io.read.valid)
+  when (if (dualPort) wen else (!ren && wen)) {
     cc_dir.write(
       Mux(wipeDone, write.bits.set, wipeSet),
       VecInit.fill(params.cache.ways) { Mux(wipeDone, write.bits.data.asUInt, 0.U) },
@@ -107,9 +111,18 @@ class Directory(params: InclusiveCacheParameters) extends Module
 
   val bypass_valid = params.dirReg(write.valid)
   val bypass = params.dirReg(write.bits, ren1 && write.valid)
-  val regout = params.dirReg(cc_dir.read(io.read.bits.set, ren), ren1)
+  val regoutRaw = params.dirReg(cc_dir.read(io.read.bits.set, ren), ren1)
   val tag = params.dirReg(RegEnable(io.read.bits.tag, ren), ren1)
   val set = params.dirReg(RegEnable(io.read.bits.set, ren), ren1)
+  // dualPort: the SRAM read does not see a write to the same set in the same cycle (read-under-write is undefined), so
+  // forward that write's way into the result. A write enqueued in the read's cycle is still in the queue at result time
+  // and is covered by the bypass below, which is newer and so applies after this.
+  val regout = if (dualPort) {
+    val fwd_valid = RegNext(ren && write.valid && wipeDone, false.B)
+    val fwd = RegEnable(write.bits, ren && write.valid)
+    VecInit(regoutRaw.zipWithIndex.map { case (d, i) =>
+      Mux(fwd_valid && fwd.set === set && fwd.way === i.U, fwd.data.asUInt, d) })
+  } else regoutRaw
 
   // Compute the victim way in case of an evicition
   val victimLFSR = random.LFSR(width = 16, params.dirReg(ren))(InclusiveCacheParameters.lfsrBits-1, 0)

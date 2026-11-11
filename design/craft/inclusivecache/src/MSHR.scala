@@ -123,6 +123,7 @@ class MSHR(params: InclusiveCacheParameters) extends Module
   val w_rprobeacklast  = RegInit(true.B)
   val s_release        = RegInit(true.B) // CW w_rprobeackfirst
   val w_releaseack     = RegInit(true.B)
+  val silent_evict     = RegInit(false.B) // clean victim, no inner copies, silentCleanEvict: no Release is sent
   val s_pprobe         = RegInit(true.B) // B
   val s_acquire        = RegInit(true.B) // A  s_release, s_pprobe [1]
   val s_flush          = RegInit(true.B) // X  w_releaseack
@@ -183,7 +184,9 @@ class MSHR(params: InclusiveCacheParameters) extends Module
   val no_wait = w_rprobeacklast && w_releaseack && w_grantlast && w_pprobeacklast && w_grantack
   io.schedule.bits.a.valid := !s_acquire && s_release && s_pprobe
   io.schedule.bits.b.valid := !s_rprobe || !s_pprobe
-  io.schedule.bits.c.valid := (!s_release && w_rprobeackfirst) || (!s_probeack && w_pprobeackfirst)
+  // a silent eviction's victim has no inner copies, so no inner Release can make it dirty before it is dropped
+  assert (!(silent_evict && !s_release && meta.dirty), "MSHR: silently evicted victim became dirty")
+  io.schedule.bits.c.valid := (!s_release && w_rprobeackfirst && !silent_evict) || (!s_probeack && w_pprobeackfirst)
   io.schedule.bits.d.valid := !s_execute && w_pprobeack && w_grant
   io.schedule.bits.e.valid := !s_grantack && w_grantfirst
   io.schedule.bits.x.valid := !s_flush && w_releaseack
@@ -552,6 +555,7 @@ class MSHR(params: InclusiveCacheParameters) extends Module
     w_rprobeacklast  := true.B
     s_release        := true.B
     w_releaseack     := true.B
+    silent_evict     := false.B
     s_pprobe         := true.B
     s_acquire        := true.B
     s_flush          := true.B
@@ -604,8 +608,10 @@ class MSHR(params: InclusiveCacheParameters) extends Module
       s_execute := false.B
       // Do we need an eviction?
       when (!new_meta.hit && new_meta.state =/= INVALID) {
+        val silent = params.micro.silentCleanEvict.B && !new_meta.dirty && new_meta.clients === 0.U
         s_release := false.B
-        w_releaseack := false.B
+        w_releaseack := silent   // a silent eviction waits for no ReleaseAck
+        silent_evict := silent
         // Do we need to shoot-down inner caches?
         when ((!params.firstLevel).B & (new_meta.clients =/= 0.U)) {
           s_rprobe := false.B

@@ -120,7 +120,15 @@ case class InclusiveCacheMicroParameters(
   portFactor: Int = 4,  // numSubBanks = (widest TL port * portFactor) / writeBytes
   dirReg:     Boolean = false,
   innerBuf:   InclusiveCachePortParameters = InclusiveCachePortParameters.fullC, // or none
-  outerBuf:   InclusiveCachePortParameters = InclusiveCachePortParameters.full)   // or flowAE
+  outerBuf:   InclusiveCachePortParameters = InclusiveCachePortParameters.full,   // or flowAE
+  // Evict a clean victim with no inner copies without a Release: only for a cache whose outer manager keeps no
+  // directory (a TLCacheCork over TL-UL memory), where a clean Release only earns a local ReleaseAck. The miss then
+  // sends its Acquire right after the victim's directory invalidate instead of after the ReleaseAck round trip.
+  silentCleanEvict: Boolean = false,
+  // Directory SRAM with a read port and a separate write port, and a pipelined write queue: a write never waits for a
+  // read, and the directory takes one write per cycle (the single-port default takes at most one every two cycles,
+  // fewer under reads). A write in the same cycle as a read is forwarded into that read's result.
+  dirDualPort: Boolean = false)
 {
   require (writeBytes > 0 && isPow2(writeBytes))
   require (memCycles > 0)
